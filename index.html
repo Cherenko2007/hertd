@@ -4,21 +4,16 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#000000" />
-<title>Bordeaux Heart</title>
+<title>Bordeaux Heart — 4 phases</title>
 <style>
-  /* ---------- Чёрный фон на всю страницу, ничего кроме анимации ---------- */
   html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
     overflow: hidden;
     background: #000;
   }
   body {
-    /* убираем подсветку тапов и выделение на мобильных */
     -webkit-tap-highlight-color: transparent;
-    -webkit-user-select: none;
     user-select: none;
     touch-action: none;
   }
@@ -38,62 +33,29 @@
   'use strict';
 
   /* ============================================================
-     0. МЕЛКИЕ ХЕЛПЕРЫ
+     0. ХЕЛПЕРЫ
      ============================================================ */
-
   const clamp = (v, a, b) => (v < a ? a : (v > b ? b : v));
   const lerp  = (a, b, t) => a + (b - a) * t;
 
-  /** Плавная S-образная интерполяция */
-  function smoothstep(edge0, edge1, x) {
-    const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-    return t * t * (3 - 2 * t);
-  }
-
-  /** "#rrggbb" -> {r,g,b} */
   function hexToRgb(hex) {
     const n = parseInt(hex.slice(1), 16);
     return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
   }
 
   /* ============================================================
-     1. НАСТРОЙКИ И ПАЛИТРА
+     1. CANVAS + АДАПТАЦИЯ
      ============================================================ */
-
-  // Винные / бордовые оттенки — от почти чёрного до яркого вина
-  const WINE_PALETTE = [
-    '#4a0a12',
-    '#6b0f1a',
-    '#7a0e1e',
-    '#8b1a2b',
-    '#a5172c'
-  ];
-
-  const CONTOUR_RATIO = 0.50;   // доля частиц, сидящих точно на контуре сердца
-  const HEART_SIZE_K  = 0.70;   // размер сердца = 70% от min(ширина, высота)
-
-  // Фазы анимации (секунды). Полный цикл = сумма всех dur.
-  const PHASES = [
-    { name: 'gather',   dur: 3.6 },  // 1. сборка из хаотичного облака
-    { name: 'ignite',   dur: 2.2 },  // 2. розжиг: плазма поднимается снизу вверх
-    { name: 'burn',     dur: 3.0 },  // 3. пульс, тлеющее горение, разряды
-    { name: 'disperse', dur: 2.4 }   // 4. распад на летящие искры
-  ];
-
-  /* ============================================================
-     2. CANVAS, РАЗМЕРЫ, АДАПТАЦИЯ
-     ============================================================ */
-
   const canvas = document.getElementById('scene');
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const ctx    = canvas.getContext('2d', { alpha: false });
 
-  let W = 0, H = 0;        // размеры в CSS-пикселях
-  let cx = 0, cy = 0;      // центр экрана
-  let S  = 1;              // масштаб сердца (1.0 нормализованного сердца = S пикселей)
-  let DPR = 1;
+  let W = 0, H = 0, DPR = 1;
+  let cx = 0, cy = 0;         // центр экрана (CSS-пиксели)
+  let S  = 1;                 // «радиус» сердца в пикселях
+  let puddleX = 0, puddleY = 0, puddleRx = 0, puddleRy = 0;
 
   function resize() {
-    DPR = Math.min(window.devicePixelRatio || 1, 2); // ограничиваем 2x ради производительности
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = Math.max(1, window.innerWidth);
     H = Math.max(1, window.innerHeight);
 
@@ -102,14 +64,20 @@
     canvas.style.width  = W + 'px';
     canvas.style.height = H + 'px';
 
-    // Рисуем в координатах CSS-пикселей
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
     cx = W / 2;
     cy = H / 2;
-    S  = Math.min(W, H) * HEART_SIZE_K;
+    S  = Math.min(W, H) * 0.62;
 
-    // После изменения размера полностью заливаем чёрным (сбрасываем «шлейфы»)
+    // Геометрия «котла» — лужи под сердцем
+    const heartBottom = cy + nMaxY * S;
+    puddleX  = cx;
+    puddleY  = heartBottom + S * 0.06;
+    puddleRx = S * 0.32;
+    puddleRy = S * 0.09;
+
+    // Полная очистка — чтобы на ресайзе не осталось артефактов
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#000';
@@ -117,31 +85,28 @@
   }
 
   /* ============================================================
-     3. МАТЕМАТИКА СЕРДЦА
+     2. МАТЕМАТИЧЕСКАЯ КРИВАЯ СЕРДЦА
+        x = 16·sin³t
+        y = 13·cos t − 5·cos 2t − 2·cos 3t − cos 4t
+     Нормализуем так, чтобы сердце умещалось в [-0.5 … +0.5],
+     и инвертируем Y (в canvas +Y идёт вниз).
      ============================================================ */
-
-  /**
-   * Классическая параметрическая кривая сердца.
-   * x = 16 sin^3(t)
-   * y = 13 cos(t) - 5 cos(2t) - 2 cos(3t) - cos(4t)
-   * Здесь y направлен ВВЕРХ (математические координаты).
-   */
-  function heartPoint(t) {
+  function heartRaw(t) {
     const x = 16 * Math.pow(Math.sin(t), 3);
-    const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
-    return { x: x, y: y };
+    const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t)
+            - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    return { x, y };
   }
 
-  const OUTLINE_N = 360;              // количество точек контура
-  const rawOutline = [];              // сырые точки кривой
-
+  const OUTLINE_N = 420;
+  const rawPts = [];
   let rMinX =  Infinity, rMaxX = -Infinity;
   let rMinY =  Infinity, rMaxY = -Infinity;
 
   for (let i = 0; i < OUTLINE_N; i++) {
     const t = (i / OUTLINE_N) * Math.PI * 2;
-    const p = heartPoint(t);
-    rawOutline.push(p);
+    const p = heartRaw(t);
+    rawPts.push(p);
     if (p.x < rMinX) rMinX = p.x;
     if (p.x > rMaxX) rMaxX = p.x;
     if (p.y < rMinY) rMinY = p.y;
@@ -152,20 +117,11 @@
   const rawCx   = (rMinX + rMaxX) / 2;
   const rawCy   = (rMinY + rMaxY) / 2;
 
-  /**
-   * Нормализованный контур:
-   *  - центр в (0, 0)
-   *  - размер примерно от -0.5 до +0.5 по большей оси
-   *  - ось Y перевёрнута (в canvas Y растёт вниз)
-   */
-  const outline = rawOutline.map(function (p) {
-    return {
-      x:  (p.x - rawCx) / rawSpan,
-      y: -(p.y - rawCy) / rawSpan
-    };
-  });
+  const outline = rawPts.map(p => ({
+    x:  (p.x - rawCx) / rawSpan,
+    y: -(p.y - rawCy) / rawSpan
+  }));
 
-  // Границы нормализованного сердца (нужны для заливки «снизу вверх»)
   let nMinX =  Infinity, nMaxX = -Infinity;
   let nMinY =  Infinity, nMaxY = -Infinity;
   for (let i = 0; i < outline.length; i++) {
@@ -176,301 +132,388 @@
     if (p.y > nMaxY) nMaxY = p.y;
   }
 
-  /**
-   * Тест «точка внутри полигона» (ray casting).
-   * Используется для равномерного заполнения внутренности сердца.
-   */
+  // Тест «точка внутри полигона» — ray casting
   function pointInPoly(px, py, poly) {
     let inside = false;
     for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
       const xi = poly[i].x, yi = poly[i].y;
       const xj = poly[j].x, yj = poly[j].y;
-      const intersect = ((yi > py) !== (yj > py)) &&
-                        (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
+      const hit = ((yi > py) !== (yj > py)) &&
+                  (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+      if (hit) inside = !inside;
     }
     return inside;
   }
 
-  /* ============================================================
-     4. СПРАЙТЫ ЧАСТИЦ (предрендер свечения)
-     ============================================================
-     Рисовать radial-gradient для каждой из ~1000 частиц каждый кадр —
-     дорого. Поэтому заранее готовим спрайты-«огоньки» и потом просто
-     растягиваем их через drawImage.
-  */
-
-  const SPRITE_SIZE = 128;
-
-  function makeSprite(hex, hot) {
-    const c = document.createElement('canvas');
-    c.width = c.height = SPRITE_SIZE;
-    const g = c.getContext('2d');
-
-    const rgb = hexToRgb(hex);
-    const r = rgb.r, gg = rgb.g, b = rgb.b;
-    const R = SPRITE_SIZE / 2;
-
-    const grd = g.createRadialGradient(R, R, 0, R, R, R);
-
-    if (hot) {
-      // «Раскалённая» искра: бело-тёплое ядро, переходящее в вино
-      grd.addColorStop(0.00, 'rgba(255, 240, 225, 0.95)');
-      grd.addColorStop(0.10, 'rgba(255, 160, 120, 0.80)');
-      grd.addColorStop(0.28, 'rgba(' + r + ',' + gg + ',' + b + ', 0.55)');
-      grd.addColorStop(0.60, 'rgba(' + r + ',' + gg + ',' + b + ', 0.15)');
-      grd.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
-    } else {
-      // Обычная «тлеющая» частица
-      const cr = Math.min(255, r + 110);
-      const cg = Math.min(255, gg + 45);
-      const cb = Math.min(255, b + 55);
-      grd.addColorStop(0.00, 'rgba(' + cr + ',' + cg + ',' + cb + ', 0.90)');
-      grd.addColorStop(0.22, 'rgba(' + r + ',' + gg + ',' + b + ', 0.70)');
-      grd.addColorStop(0.55, 'rgba(' + r + ',' + gg + ',' + b + ', 0.16)');
-      grd.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
-    }
-
-    g.fillStyle = grd;
-    g.fillRect(0, 0, SPRITE_SIZE, SPRITE_SIZE);
-    return c;
-  }
-
-  const sprites    = WINE_PALETTE.map(function (hex) { return makeSprite(hex, false); });
-  const hotSprites = WINE_PALETTE.map(function (hex) { return makeSprite(hex, true);  });
-
-  /* ============================================================
-     5. ЧАСТИЦЫ
-     ============================================================ */
-
-  const particles = [];
-
-  /** Случайная точка строго внутри сердца (rejection sampling) */
+  // Случайная точка строго внутри сердца (в нормализованных координатах)
   function randomInteriorPoint() {
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 80; i++) {
       const x = nMinX + Math.random() * (nMaxX - nMinX);
       const y = nMinY + Math.random() * (nMaxY - nMinY);
-      if (pointInPoly(x, y, outline)) return { x: x, y: y };
+      if (pointInPoly(x, y, outline)) return { x, y };
     }
     return { x: 0, y: 0 };
   }
 
-  /** Создание одной частицы */
-  function makeParticle() {
+  /* ============================================================
+     3. ПРЕДРЕНДЕР СПРАЙТОВ СВЕЧЕНИЯ
+        Рисовать radial-gradient для каждой из ~1000 частиц каждый кадр
+        слишком дорого. Поэтому заранее делаем «огоньки» и растягиваем.
+     ============================================================ */
+  const SPR_SIZE = 128;
+
+  function makeSprite(hex, hot) {
+    const c = document.createElement('canvas');
+    c.width = c.height = SPR_SIZE;
+    const g = c.getContext('2d');
+    const rgb = hexToRgb(hex);
+    const R = SPR_SIZE / 2;
+
+    const grd = g.createRadialGradient(R, R, 0, R, R, R);
+
+    if (hot) {
+      grd.addColorStop(0.00, 'rgba(255, 240, 230, 0.95)');
+      grd.addColorStop(0.15, 'rgba(255, 170, 140, 0.70)');
+      grd.addColorStop(0.35, 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ', 0.45)');
+      grd.addColorStop(0.70, 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ', 0.10)');
+      grd.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
+    } else {
+      const cr = Math.min(255, rgb.r + 90);
+      const cg = Math.min(255, rgb.g + 40);
+      const cb = Math.min(255, rgb.b + 45);
+      grd.addColorStop(0.00, 'rgba(' + cr + ',' + cg + ',' + cb + ', 0.85)');
+      grd.addColorStop(0.25, 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ', 0.55)');
+      grd.addColorStop(0.60, 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ', 0.12)');
+      grd.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
+    }
+
+    g.fillStyle = grd;
+    g.fillRect(0, 0, SPR_SIZE, SPR_SIZE);
+    return c;
+  }
+
+  // Винные / бордовые оттенки
+  const COLORS       = ['#6b0f1a', '#8b1a2b', '#a61c3a', '#4a0a12'];
+  const SPRITES      = COLORS.map(c => makeSprite(c, false));
+  const HOT_SPRITES  = COLORS.map(c => makeSprite(c, true));
+
+  /* ============================================================
+     4. ЧАСТИЦЫ
+        • heartParts   — держат форму сердца (контур + внутренность)
+        • vortexParts  — крутятся вокруг лужи-котла, при вспышке
+                         выстреливают вверх внутрь сердца.
+     ============================================================ */
+
+  const heartParts  = [];
+  const vortexParts = [];
+
+  function makeHeartParticle() {
     let tx, ty;
 
-    if (Math.random() < CONTOUR_RATIO) {
-      // --- частица на контуре (с лёгким разбросом, чтобы контур был «живым») ---
+    if (Math.random() < 0.5) {
+      // --- на контуре (с крошечным разбросом, чтобы линия была «живой») ---
       const f  = Math.random() * outline.length;
       const i0 = Math.floor(f) % outline.length;
       const i1 = (i0 + 1) % outline.length;
       const k  = f - Math.floor(f);
-
-      tx = lerp(outline[i0].x, outline[i1].x, k) + (Math.random() - 0.5) * 0.014;
-      ty = lerp(outline[i0].y, outline[i1].y, k) + (Math.random() - 0.5) * 0.014;
+      tx = lerp(outline[i0].x, outline[i1].x, k);
+      ty = lerp(outline[i0].y, outline[i1].y, k);
     } else {
-      // --- частица внутри сердца, распределена равномерно ---
+      // --- равномерно внутри сердца ---
       const p = randomInteriorPoint();
-      tx = p.x;
-      ty = p.y;
+      tx = p.x; ty = p.y;
     }
 
-    // Масштаб частиц зависит от размера сердца (чтобы на телефоне не было «гигантов»)
-    const sc = clamp(S / 620, 0.6, 1.3);
-
     return {
-      // цель в нормализованном пространстве сердца
-      tx: tx,
-      ty: ty,
+      tx, ty,                          // цель в нормализованном пространстве
+      x: 0, y: 0,                      // текущая позиция (CSS-пиксели)
+      vx: 0, vy: 0,                    // скорость (для фазы вспышки/остывания)
 
-      // текущая позиция на экране (в CSS-пикселях)
-      x: 0, y: 0,
+      r: 2.5 + Math.random() * 3.0,    // размер
+      colorIdx: (Math.random() * COLORS.length) | 0,
+      hot: Math.random() < 0.30,       // «раскалённая» частица
 
-      // стартовая позиция «хаотичного облака»
-      sx: 0, sy: 0,
+      flickPhase: Math.random() * Math.PI * 2,
+      flickSpeed: 2 + Math.random() * 8,
 
-      // скорость (для фазы распада)
-      vx: 0, vy: 0,
-
-      r: (2.0 + Math.random() * 3.0) * sc,          // радиус отрисовки спрайта
-      colorIdx: (Math.random() * WINE_PALETTE.length) | 0,
-      hot: Math.random() < 0.35,                    // часть частиц — «раскалённые»
-
-      alpha: 0,
-      heat: 0,
-
-      delay:        Math.random() * 0.45,           // индивидуальная задержка при сборке
-      swirl:        Math.random() < 0.5 ? -1 : 1,   // направление закручивания
-      swirlAmount:  0.5 + Math.random() * 1.2,
-
-      driftPhase:   Math.random() * Math.PI * 2,    // фаза дрейфа
-      driftSpeed:   0.6 + Math.random() * 1.8,
-
-      flickerPhase: Math.random() * Math.PI * 2,    // фаза мерцания
-      flickerSpeed: 4 + Math.random() * 12,
+      driftPhase: Math.random() * Math.PI * 2,
+      driftSpeed: 0.4 + Math.random() * 1.4,
 
       seed: Math.random() * 1000
     };
   }
 
-  /** Отправить частицу в случайную точку «хаотичного облака» вокруг сердца */
-  function scatterToCloud(p) {
-    const ang = Math.random() * Math.PI * 2;
-    const rad = (0.35 + Math.random() * 1.05) * Math.max(W, H) * 0.6;
+  function makeVortexParticle() {
+    // радиус в [0.15 … 1.0], распределение с уплотнением к центру
+    const rad = 0.15 + Math.pow(Math.random(), 0.7) * 0.85;
+    return {
+      angle: Math.random() * Math.PI * 2,
+      radius: rad,
+      angularSpeedBase: 0.6 + Math.random() * 1.0,
 
-    p.sx = cx + Math.cos(ang) * rad;
-    p.sy = cy + Math.sin(ang) * rad * 0.8;
+      // Смещение от орбитальной позиции — используется при запуске
+      offX: 0, offY: 0,
+      ovx: 0, ovy: 0,
 
-    p.x = p.sx;
-    p.y = p.sy;
+      x: 0, y: 0,
+      r: 2 + Math.random() * 3,
+      colorIdx: (Math.random() * COLORS.length) | 0,
+      hot: Math.random() < 0.5,
 
-    p.vx = 0;
-    p.vy = 0;
-    p.alpha = 0;
-    p.heat = 0;
+      flickPhase: Math.random() * Math.PI * 2,
+      flickSpeed: 5 + Math.random() * 10,
+
+      seed: Math.random() * 1000
+    };
   }
 
-  /** Полная пересборка массива частиц */
   function buildParticles() {
-    // Количество зависит от размера экрана (от 550 до 1400)
-    const count = Math.round(clamp(Math.min(W, H) * 1.6, 550, 1400));
+    const minDim = Math.min(W, H);
+    const heartCount  = Math.round(clamp(minDim * 1.40, 550, 1100));
+    const vortexCount = Math.round(clamp(minDim * 0.40, 150, 300));
 
-    particles.length = 0;
-    for (let i = 0; i < count; i++) {
-      const p = makeParticle();
-      scatterToCloud(p);
-      particles.push(p);
+    heartParts.length = 0;
+    for (let i = 0; i < heartCount; i++) {
+      const p = makeHeartParticle();
+      p.x = cx + p.tx * S;
+      p.y = cy + p.ty * S;
+      p.vx = 0; p.vy = 0;
+      heartParts.push(p);
+    }
+
+    vortexParts.length = 0;
+    for (let i = 0; i < vortexCount; i++) {
+      vortexParts.push(makeVortexParticle());
     }
   }
 
   /* ============================================================
-     6. ТАЙМЛАЙН ФАЗ
+     5. МОЛНИИ (внутренние разряды)
      ============================================================ */
+  const arcs = [];
 
-  let phaseIndex = 0;
-  let phaseTime  = 0;
-  let time       = 0;   // общее время работы (для мерцаний/дрейфа)
-  let puddle     = 0;   // текущая «сила» свечения-лужи под сердцем
+  function makeArc(power) {
+    // Оба конца — случайные точки внутри сердца
+    const a = randomInteriorPoint();
+    const b = randomInteriorPoint();
 
-  const arcs = [];      // активные молниевидные разряды
-  let arcTimer = 0;
-
-  function currentPhase()   { return PHASES[phaseIndex]; }
-  function phaseProgress()  { return clamp(phaseTime / currentPhase().dur, 0, 1); }
-
-  /** Действия при входе в новую фазу */
-  function enterPhase(idx) {
-    const name = PHASES[idx].name;
-
-    if (name === 'gather') {
-      // Раскидываем все частицы по хаотичному облаку
-      for (let i = 0; i < particles.length; i++) scatterToCloud(particles[i]);
-
-    } else if (name === 'disperse') {
-      // Даём каждой частице импульс «взрыва» — наружу и вверх, как искры от костра
-      for (let i = 0; i < particles.length; i++) {
-        const p = particles[i];
-
-        let dx = p.x - cx;
-        let dy = p.y - cy;
-        const len = Math.hypot(dx, dy) || 1;
-        dx /= len;
-        dy /= len;
-
-        dy -= 0.7; // подбрасываем вверх (в canvas вверх = -Y)
-
-        const l2 = Math.hypot(dx, dy) || 1;
-        dx /= l2;
-        dy /= l2;
-
-        const sp = (0.55 + Math.random() * 1.15) * S * 1.1;
-
-        p.vx = dx * sp + (Math.random() - 0.5) * 40;
-        p.vy = dy * sp + (Math.random() - 0.5) * 40;
-      }
-
-    } else if (name === 'ignite') {
-      arcTimer = 0.25;
-    }
-  }
-
-  /* ============================================================
-     7. МОЛНИЕВИДНЫЕ РАЗРЯДЫ ВНУТРИ СЕРДЦА
-     ============================================================ */
-
-  /** Ломаная от нижней части сердца к случайной точке контура */
-  function makeArc() {
-    const endIdx = (Math.random() * outline.length) | 0;
-    const ex = outline[endIdx].x;
-    const ey = outline[endIdx].y;
-
-    // Старт — в нижней половине сердца, ближе к его середине
-    const sx = (Math.random() - 0.5) * 0.28;
-    const sy = nMinY + (nMaxY - nMinY) * (0.45 + Math.random() * 0.5);
-
-    const steps = 7 + ((Math.random() * 5) | 0);
+    const steps = 6 + ((Math.random() * 6) | 0);
     const pts = [];
-
     for (let i = 0; i <= steps; i++) {
       const f = i / steps;
-      const x = lerp(sx, ex, f);
-      const y = lerp(sy, ey, f);
-      // Дрожание сильнее в середине разряда
-      const j = Math.sin(f * Math.PI) * 0.05;
-      pts.push({
-        x: x + (Math.random() - 0.5) * j,
-        y: y + (Math.random() - 0.5) * j
-      });
+      let x = lerp(a.x, b.x, f);
+      let y = lerp(a.y, b.y, f);
+      const jit = Math.sin(f * Math.PI) * 0.06 * (0.5 + power);
+      x += (Math.random() - 0.5) * jit;
+      y += (Math.random() - 0.5) * jit;
+      pts.push({ x, y });
     }
 
-    const lifeMax = 0.10 + Math.random() * 0.22;
-    return { pts: pts, life: lifeMax, lifeMax: lifeMax };
+    const life = 0.12 + Math.random() * 0.22;
+    return { pts, life, lifeMax: life };
   }
 
   /* ============================================================
-     8. ОБНОВЛЕНИЕ ЛОГИКИ
+     6. ФАЗЫ
+        Покой → Разгон → Вспышка → Остывание → …
      ============================================================ */
+  const PHASES = [
+    { name: 'rest',       dur: 4.0 },
+    { name: 'accelerate', dur: 3.5 },
+    { name: 'flash',      dur: 1.8 },
+    { name: 'cool',       dur: 3.7 }
+  ];
 
+  let phaseIdx  = 0;
+  let phaseT    = 0;
+  let phaseName = PHASES[0].name;
+
+  // Сглаженные глобальные величины
+  let energy     = 0.15;   // 0..1 — общая «раскалённость» сцены
+  let vortexMult = 1.0;    // множитель скорости вихря
+  let chaos      = 0.0;    // 0..1 — насколько сердце «кипит»
+
+  let arcTimer = 0;        // таймер спавна молний
+  let time     = 0;        // глобальное время анимации
+
+  function onEnterPhase(name) {
+    if (name === 'flash') {
+      // -------- ВЗРЫВ --------
+      // Лёгкий импульс частицам сердца наружу (ради «толчка»)
+      for (let i = 0; i < heartParts.length; i++) {
+        const p = heartParts[i];
+        const dx = p.x - cx;
+        const dy = p.y - cy;
+        const len = Math.hypot(dx, dy) || 1;
+        const imp = 60 + Math.random() * 120;
+        p.vx += (dx / len) * imp;
+        p.vy += (dy / len) * imp;
+      }
+      // Вихрь выстреливает вверх — задаём скорость запуска
+      for (let i = 0; i < vortexParts.length; i++) {
+        const p = vortexParts[i];
+        p.ovx = (Math.random() - 0.5) * 260;
+        p.ovy = -(1200 + Math.random() * 600); // вверх
+      }
+      arcTimer = 0;
+    }
+  }
+
+  /* ============================================================
+     7. ОБНОВЛЕНИЕ
+     ============================================================ */
   function update(dt) {
     time += dt;
+    phaseT += dt;
 
-    // ---------- Таймлайн фаз ----------
-    phaseTime += dt;
+    // ---- Переключение фаз ----
     let guard = 0;
-    while (phaseTime >= PHASES[phaseIndex].dur && guard++ < 10) {
-      phaseTime -= PHASES[phaseIndex].dur;
-      phaseIndex = (phaseIndex + 1) % PHASES.length;
-      enterPhase(phaseIndex);
+    while (phaseT >= PHASES[phaseIdx].dur && guard++ < 8) {
+      phaseT -= PHASES[phaseIdx].dur;
+      phaseIdx = (phaseIdx + 1) % PHASES.length;
+      phaseName = PHASES[phaseIdx].name;
+      onEnterPhase(phaseName);
     }
 
-    const phase = currentPhase().name;
-    const prog  = phaseProgress();
+    const pProg = phaseT / PHASES[phaseIdx].dur; // 0..1 внутри фазы
 
-    // ---------- «Лужа» тлеющего огня под сердцем ----------
-    let pTarget = 0;
-    if (phase === 'gather') {
-      pTarget = 0.08 + 0.34 * smoothstep(0.55, 1, prog);
-    } else if (phase === 'ignite') {
-      pTarget = 0.42 + 0.58 * prog;
-    } else if (phase === 'burn') {
-      pTarget = 1.0;
-    } else {
-      pTarget = (1 - prog) * (1 - prog);
+    // ---- Целевые значения для сглаженных величин ----
+    let energyT, vortexMultT, chaosT, smoothRate;
+
+    if (phaseName === 'rest') {
+      energyT     = 0.15;
+      vortexMultT = 1.0;
+      chaosT      = 0.0;
+      smoothRate  = 2.5;
+
+    } else if (phaseName === 'accelerate') {
+      // Плавное ускорение: ease-in — медленный старт, быстрый конец
+      const e = pProg * pProg;
+      energyT     = 0.15 + 0.85 * e;
+      vortexMultT = 1.0 + 11.0 * e;
+      chaosT      = 0.0;
+      smoothRate  = 3.5;
+
+    } else if (phaseName === 'flash') {
+      energyT     = 1.0;
+      vortexMultT = 14.0;
+      chaosT      = 1.0;
+      smoothRate  = 6.0;   // быстрее откликается
+
+    } else { // cool
+      const e = 1 - Math.pow(1 - pProg, 2); // ease-out
+      energyT     = 1.0 - 0.85 * e;
+      vortexMultT = 14.0 - 13.0 * e;
+      chaosT      = 1.0 - e;
+      smoothRate  = 2.5;
     }
-    puddle += (pTarget - puddle) * Math.min(1, dt * 5);
 
-    // ---------- Разряды ----------
-    if (phase === 'ignite') {
-      arcTimer -= dt;
-      if (arcTimer <= 0 && prog > 0.35) {
-        arcs.push(makeArc());
-        arcTimer = 0.10 + Math.random() * 0.35;
+    // ---- Экспоненциальное сглаживание — фазы без рывков ----
+    const aRate = Math.min(1, dt * smoothRate);
+    energy     += (energyT     - energy)     * aRate;
+    vortexMult += (vortexMultT - vortexMult) * aRate;
+    chaos      += (chaosT      - chaos)      * aRate;
+
+    /* ------------------------------------------------------------
+       Частицы СЕРДЦА
+       Пружина к своей цели + шум. При chaos→0 — дрожат на месте,
+       при chaos→1 — кипят и мечутся.
+       ------------------------------------------------------------ */
+    const kSpring  = lerp(90, 1.0, chaos);   // жёсткость пружины
+    const kDamp    = lerp(11, 0.8, chaos);   // демпфирование
+    const noiseAmp = lerp(6, 700, chaos);    // амплитуда шума (px/s²)
+
+    // Лёгкая пульсация формы
+    const pulse = 1 + 0.012 * Math.sin(time * 2.1);
+
+    for (let i = 0; i < heartParts.length; i++) {
+      const p = heartParts[i];
+
+      const TX = cx + p.tx * S * pulse;
+      const TY = cy + p.ty * S * pulse;
+
+      // Пружина
+      const ax = -kSpring * (p.x - TX) - kDamp * p.vx;
+      const ay = -kSpring * (p.y - TY) - kDamp * p.vy;
+
+      p.vx += ax * dt;
+      p.vy += ay * dt;
+
+      // Шум
+      p.vx += (Math.random() - 0.5) * noiseAmp * dt;
+      p.vy += (Math.random() - 0.5) * noiseAmp * dt;
+
+      // Интеграция
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+
+    /* ------------------------------------------------------------
+       Частицы КОТЛА (вихрь)
+       1) угол всегда движется со скоростью ~ vortexMult
+       2) у каждой частицы есть смещение offX/offY от орбитальной
+          позиции — оно «0» в покое и растёт при запуске вверх
+       ------------------------------------------------------------ */
+    for (let i = 0; i < vortexParts.length; i++) {
+      const p = vortexParts[i];
+
+      // Орбитальный угол
+      p.angle += p.angularSpeedBase * vortexMult * dt;
+
+      // Орбитальная позиция (эллипс — вид на «лужу» сверху-сбоку)
+      const orbitX = puddleX + Math.cos(p.angle) * p.radius * puddleRx;
+      const orbitY = puddleY + Math.sin(p.angle) * p.radius * puddleRy;
+
+      // Физика смещения от орбитальной позиции
+      let kOff, dOff;
+      if (phaseName === 'flash') {
+        kOff = 0.0;   // пружины нет — частица свободно летит
+        dOff = 3.0;   // лёгкое сопротивление воздуха
+      } else if (phaseName === 'cool') {
+        kOff = 6.0;   // пружина возвращает обратно
+        dOff = 5.0;
+      } else {
+        kOff = 100;   // очень жёсткая — смещение ~0
+        dOff = 20;
       }
-    } else if (phase === 'burn') {
+
+      const oax = -kOff * p.offX - dOff * p.ovx;
+      const oay = -kOff * p.offY - dOff * p.ovy;
+
+      p.ovx += oax * dt;
+      p.ovy += oay * dt;
+
+      // Гравитация тянет вниз только в фазе вспышки
+      if (phaseName === 'flash') {
+        p.ovy += 700 * dt;
+        // Немного шума — плазма «кипит» в полёте
+        p.ovx += (Math.random() - 0.5) * 400 * dt;
+        p.ovy += (Math.random() - 0.5) * 400 * dt;
+      }
+
+      p.offX += p.ovx * dt;
+      p.offY += p.ovy * dt;
+
+      // Итоговая позиция
+      p.x = orbitX + p.offX;
+      p.y = orbitY + p.offY;
+    }
+
+    /* ------------------------------------------------------------
+       Молнии
+       ------------------------------------------------------------ */
+    if (phaseName === 'flash') {
       arcTimer -= dt;
       if (arcTimer <= 0) {
-        arcs.push(makeArc());
-        arcTimer = 0.04 + Math.random() * 0.20;
+        arcs.push(makeArc(1.0));
+        arcTimer = 0.015 + Math.random() * 0.06;
+      }
+    } else if (phaseName === 'accelerate' && pProg > 0.7) {
+      // редкие предвестники перед вспышкой
+      arcTimer -= dt;
+      if (arcTimer <= 0) {
+        arcs.push(makeArc(0.4));
+        arcTimer = 0.15 + Math.random() * 0.20;
       }
     }
 
@@ -478,191 +521,123 @@
       arcs[i].life -= dt;
       if (arcs[i].life <= 0) arcs.splice(i, 1);
     }
-
-    // ---------- Частицы ----------
-    updateParticles(dt, phase, prog);
-  }
-
-  function updateParticles(dt, phase, prog) {
-    // Общая «пульсация» сердца в горячих фазах
-    const pulsing = (phase === 'ignite' || phase === 'burn');
-    const pulse = pulsing
-      ? 1 + 0.030 * Math.sin(time * 3.1) + 0.015 * Math.sin(time * 7.7 + 1.3)
-      : 1;
-    const scale = S * pulse;
-
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-
-      const TX = cx + p.tx * scale;
-      const TY = cy + p.ty * scale;
-
-      if (phase === 'gather') {
-        /* --- СБОРКА: частица летит из облака к своей точке --- */
-        const d = p.delay * 0.7;
-        const local = clamp((prog - d) / (1 - d), 0, 1);
-        const e = 1 - Math.pow(1 - local, 3);   // easeOutCubic
-        const k = 1 - e;
-
-        const dx = p.sx - TX;
-        const dy = p.sy - TY;
-
-        // Затухающее закручивание вокруг цели — полёт идёт по дуге
-        const ang = p.swirl * p.swirlAmount * e;
-        const ca = Math.cos(ang), sa = Math.sin(ang);
-        const rx = dx * ca - dy * sa;
-        const ry = dx * sa + dy * ca;
-
-        p.x = TX + rx * k + Math.sin(time * 2.2 + p.seed) * 4 * k;
-        p.y = TY + ry * k + Math.cos(time * 1.9 + p.seed) * 4 * k;
-
-        p.alpha = smoothstep(0.0, 0.25, local);
-        p.heat  = 0;
-
-      } else if (phase === 'ignite') {
-        /* --- РОЗЖИГ: плазма поднимается снизу вверх --- */
-        const vn = (nMaxY - p.ty) / (nMaxY - nMinY); // 0 — низ, 1 — верх
-        const front = prog * 1.3;
-
-        p.heat = clamp((front - vn) / 0.30, 0, 1);
-
-        const j = 0.6 + p.heat * 2.8;
-        p.x = TX + Math.sin(time * p.driftSpeed + p.driftPhase) * j;
-        p.y = TY + Math.cos(time * p.driftSpeed * 0.83 + p.driftPhase * 1.6) * j;
-
-        p.alpha = 0.30 + 0.70 * p.heat;
-
-      } else if (phase === 'burn') {
-        /* --- ГОРЕНИЕ: пульс, максимальный жар, сильное мерцание --- */
-        p.heat = 1;
-
-        const j = 1.2 + 2.4 * Math.abs(Math.sin(time * 3.3 + p.seed * 0.1));
-        p.x = TX + Math.sin(time * p.driftSpeed * 1.5 + p.driftPhase) * j;
-        p.y = TY + Math.cos(time * p.driftSpeed * 1.25 + p.driftPhase * 1.6) * j;
-
-        p.alpha = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(time * p.flickerSpeed * 0.6 + p.flickerPhase));
-
-      } else {
-        /* --- РАСПАД: частицы разлетаются и гаснут, как пепел --- */
-        const drag = Math.exp(-1.9 * dt);
-        p.vx *= drag;
-        p.vy *= drag;
-        p.vy -= 30 * dt;   // медленное всплывание вверх
-
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-
-        p.alpha = Math.pow(1 - prog, 1.7);
-        p.heat *= Math.exp(-4 * dt);
-      }
-    }
   }
 
   /* ============================================================
-     9. ОТРИСОВКА
+     8. РЕНДЕР
      ============================================================ */
 
-  /** Свечение-«лужа» тлеющего огня под сердцем */
+  // Лужа-«котёл» — сияющая винная плазма
   function drawPuddle() {
-    if (puddle < 0.01) return;
+    const flick    = 0.85 + 0.15 * Math.sin(time * 9.3);
+    const strength = (0.40 + 0.60 * energy) * flick;
 
-    // Живое мерцание «углей»
-    const flick = 0.82 + 0.18 * Math.sin(time * 9.3) * Math.sin(time * 5.1 + 1.3);
-    const strength = puddle * flick;
+    const rx = puddleRx * (1 + 0.05 * Math.sin(time * 1.7));
+    const ry = puddleRy;
 
-    const baseY = cy + nMaxY * S;       // кончик сердца
-    const py = baseY + S * 0.02;
-
-    const rx = S * (0.34 + 0.03 * Math.sin(time * 1.7));
-    const ry = S * (0.085 + 0.015 * Math.sin(time * 2.9));
-
-    // --- Основное эллиптическое свечение ---
     ctx.save();
-    ctx.translate(cx, py);
+    ctx.translate(puddleX, puddleY);
     ctx.scale(1, ry / rx);
 
-    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
-    g.addColorStop(0.00, 'rgba(255, 120,  90, ' + (0.16 * strength) + ')');
-    g.addColorStop(0.22, 'rgba(190,  40,  60, ' + (0.14 * strength) + ')');
-    g.addColorStop(0.55, 'rgba(110,  12,  28, ' + (0.09 * strength) + ')');
-    g.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
-
-    ctx.fillStyle = g;
+    // Широкое внешнее свечение
+    const g1 = ctx.createRadialGradient(0, 0, 0, 0, 0, rx * 1.7);
+    g1.addColorStop(0.00, 'rgba(255, 120, 100, ' + (0.14 * strength) + ')');
+    g1.addColorStop(0.30, 'rgba(170,  25,  50, ' + (0.16 * strength) + ')');
+    g1.addColorStop(0.65, 'rgba( 90,  10,  25, ' + (0.10 * strength) + ')');
+    g1.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = g1;
     ctx.beginPath();
-    ctx.arc(0, 0, rx, 0, Math.PI * 2);
+    ctx.arc(0, 0, rx * 1.7, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
 
-    // --- Маленькое яркое ядро (раскалённые угли) ---
-    ctx.save();
-    ctx.translate(cx, py);
-    ctx.scale(1, 0.35);
-
-    const r2 = rx * 0.35;
-    const g2 = ctx.createRadialGradient(0, 0, 0, 0, 0, r2);
-    g2.addColorStop(0.0, 'rgba(255, 180, 140, ' + (0.20 * strength) + ')');
-    g2.addColorStop(0.5, 'rgba(200,  50,  60, ' + (0.10 * strength) + ')');
-    g2.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
-
+    // Яркое ядро
+    const g2 = ctx.createRadialGradient(0, 0, 0, 0, 0, rx * 0.7);
+    g2.addColorStop(0.00, 'rgba(255, 170, 140, ' + (0.40 * strength) + ')');
+    g2.addColorStop(0.50, 'rgba(200,  55,  65, ' + (0.18 * strength) + ')');
+    g2.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
     ctx.fillStyle = g2;
     ctx.beginPath();
-    ctx.arc(0, 0, r2, 0, Math.PI * 2);
+    ctx.arc(0, 0, rx * 0.7, 0, Math.PI * 2);
     ctx.fill();
+
     ctx.restore();
   }
 
-  /** Внутреннее свечение сердца (эффект «горит изнутри») */
-  function drawCore() {
-    if (puddle < 0.05) return;
-
-    const flick = 0.85 + 0.15 * Math.sin(time * 8.7) * Math.sin(time * 4.3 + 0.7);
-    const R = S * 0.42;
+  // Внутреннее свечение самого сердца (усиливается вместе с energy)
+  function drawHeartCore() {
+    if (energy < 0.05) return;
+    const flick = 0.85 + 0.15 * Math.sin(time * 8.7);
+    const R  = S * 0.42;
     const ox = cx;
-    const oy = cy + S * 0.06;
+    const oy = cy + S * 0.02;
 
     const g = ctx.createRadialGradient(ox, oy, 0, ox, oy, R);
-    g.addColorStop(0.0, 'rgba(200, 45, 60, ' + (0.10 * puddle * flick) + ')');
-    g.addColorStop(0.5, 'rgba(120, 15, 30, ' + (0.06 * puddle * flick) + ')');
-    g.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
-
+    g.addColorStop(0.00, 'rgba(210, 45, 65, ' + (0.10 * energy * flick) + ')');
+    g.addColorStop(0.50, 'rgba(120, 15, 35, ' + (0.07 * energy * flick) + ')');
+    g.addColorStop(1.00, 'rgba(0, 0, 0, 0)');
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.arc(ox, oy, R, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  /** Отрисовка всех частиц */
-  function drawParticles() {
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-      if (p.alpha <= 0.01) continue;
+  // Все частицы сердца
+  function drawHeartParticles() {
+    for (let i = 0; i < heartParts.length; i++) {
+      const p = heartParts[i];
 
-      // Выбор спрайта: «раскалённый» или обычный
-      const useHot = (p.heat > 0.45 && p.hot);
-      const spr = useHot ? hotSprites[p.colorIdx] : sprites[p.colorIdx];
+      // Яркость растёт вместе с energy
+      const base     = 0.70 + 0.30 * energy;
+      const flickAmp = 0.10 + 0.45 * energy;
+      const flick    = base + flickAmp * Math.sin(time * p.flickSpeed + p.flickPhase);
+      const alpha    = clamp(flick, 0, 1);
+      if (alpha <= 0.01) continue;
 
-      // Индивидуальное мерцание
-      const flick = 0.72 + 0.28 * Math.sin(time * p.flickerSpeed + p.flickerPhase);
-      const a = p.alpha * flick;
-      if (a <= 0.01) continue;
+      // Лёгкий дрейф, заметный в покое и исчезающий в хаосе
+      const driftAmp = (1 - chaos) * 1.5;
+      const drawX = p.x + Math.sin(time * p.driftSpeed + p.driftPhase) * driftAmp;
+      const drawY = p.y + Math.cos(time * p.driftSpeed * 1.1 + p.driftPhase * 1.3) * driftAmp;
 
-      // В горячих фазах частица чуть раздувается
-      const r = p.r * (1 + p.heat * 0.9);
+      // «Раскалённый» вид при высокой энергии
+      const useHot = (p.hot || energy > 0.9);
+      const spr = useHot ? HOT_SPRITES[p.colorIdx] : SPRITES[p.colorIdx];
 
-      ctx.globalAlpha = a > 1 ? 1 : a;
-      ctx.drawImage(spr, p.x - r, p.y - r, r * 2, r * 2);
+      const r = p.r * (1 + 0.4 * energy + 0.5 * chaos);
+
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(spr, drawX - r * 2, drawY - r * 2, r * 4, r * 4);
     }
     ctx.globalAlpha = 1;
   }
 
-  /** Отрисовка молниевидных разрядов */
+  // Частицы вихря
+  function drawVortexParticles() {
+    for (let i = 0; i < vortexParts.length; i++) {
+      const p = vortexParts[i];
+
+      const flick = 0.65 + 0.35 * Math.sin(time * p.flickSpeed + p.flickPhase);
+      const alpha = (0.35 + 0.65 * energy) * flick;
+      if (alpha <= 0.01) continue;
+
+      const useHot = (p.hot && energy > 0.5);
+      const spr = useHot ? HOT_SPRITES[p.colorIdx] : SPRITES[p.colorIdx];
+
+      const r = p.r * (1 + 0.5 * energy);
+
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(spr, p.x - r * 2, p.y - r * 2, r * 4, r * 4);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Молнии
   function drawArcs() {
     ctx.lineJoin = 'round';
     ctx.lineCap  = 'round';
 
-    for (let i = arcs.length - 1; i >= 0; i--) {
+    for (let i = 0; i < arcs.length; i++) {
       const a = arcs[i];
-      const k = a.life / a.lifeMax;   // 1 -> 0
+      const k = a.life / a.lifeMax;
       if (k <= 0) continue;
 
       ctx.beginPath();
@@ -672,56 +647,54 @@
       }
 
       // Внешнее свечение
-      ctx.strokeStyle = 'rgba(150, 20, 45, ' + (0.30 * k) + ')';
+      ctx.strokeStyle = 'rgba(160, 25, 50, ' + (0.35 * k) + ')';
       ctx.lineWidth = 4.5;
       ctx.stroke();
 
       // Средний слой
-      ctx.strokeStyle = 'rgba(220, 70, 80, ' + (0.55 * k) + ')';
+      ctx.strokeStyle = 'rgba(225, 70, 90, ' + (0.60 * k) + ')';
       ctx.lineWidth = 2.0;
       ctx.stroke();
 
-      // Яркое ядро разряда
-      ctx.strokeStyle = 'rgba(255, 220, 210, ' + (0.85 * k) + ')';
-      ctx.lineWidth = 0.8;
+      // Яркое ядро
+      ctx.strokeStyle = 'rgba(255, 220, 215, ' + (0.90 * k) + ')';
+      ctx.lineWidth = 0.9;
       ctx.stroke();
     }
   }
 
-  /** Полный кадр */
+  // Полный кадр
   function render() {
-    // 1) Затемняем предыдущий кадр — получаем «шлейфы» у летящих искр
+    // 1) Затемняем предыдущий кадр — остаются «шлейфы» искр
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.40)';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
     ctx.fillRect(0, 0, W, H);
 
     // 2) Всё свечение — аддитивно
     ctx.globalCompositeOperation = 'lighter';
 
-    drawCore();
+    drawHeartCore();
     drawPuddle();
-    drawParticles();
+    drawVortexParticles();
+    drawHeartParticles();
     drawArcs();
 
-    // 3) Возвращаем режим по умолчанию
-    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
   }
 
   /* ============================================================
-     10. ГЛАВНЫЙ ЦИКЛ
+     9. ГЛАВНЫЙ ЦИКЛ
      ============================================================ */
-
   let lastT = 0;
 
   function frame(now) {
     if (!lastT) lastT = now;
-
     let dt = (now - lastT) / 1000;
     lastT = now;
 
-    // Защита от огромных скачков (сворачивание вкладки, лаги)
+    // Защита от больших скачков (свёрнутая вкладка, лаги)
     if (dt > 0.05) dt = 0.05;
     if (dt < 0)    dt = 0;
 
@@ -732,22 +705,36 @@
   }
 
   /* ============================================================
-     11. СТАРТ И РЕАКЦИЯ НА ИЗМЕНЕНИЕ РАЗМЕРА
+     10. ИНИЦИАЛИЗАЦИЯ
      ============================================================ */
-
   resize();
   buildParticles();
-  enterPhase(0);
+  onEnterPhase('rest');
+  requestAnimationFrame(frame);
 
+  // Реакция на изменение размеров
   window.addEventListener('resize', function () {
     resize();
+    // Возвращаем частицы сердца к их целям в новых координатах
+    for (let i = 0; i < heartParts.length; i++) {
+      const p = heartParts[i];
+      p.x = cx + p.tx * S;
+      p.y = cy + p.ty * S;
+      p.vx = 0; p.vy = 0;
+    }
   }, { passive: true });
 
   window.addEventListener('orientationchange', function () {
-    setTimeout(resize, 120);
+    setTimeout(function () {
+      resize();
+      for (let i = 0; i < heartParts.length; i++) {
+        const p = heartParts[i];
+        p.x = cx + p.tx * S;
+        p.y = cy + p.ty * S;
+        p.vx = 0; p.vy = 0;
+      }
+    }, 150);
   }, { passive: true });
-
-  requestAnimationFrame(frame);
 
 })();
 </script>
