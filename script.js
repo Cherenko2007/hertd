@@ -9,19 +9,17 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-// Винные оттенки (от темного до яркого рубинового)
+// Винные оттенки (от темного до яркого)
 const WINE_SHADES = [
     '#4A0E17', '#6B1421', '#8B1C2F', '#A8283F', '#C43D54', '#E05B71'
 ];
 
-const PARTICLE_COUNT = 6000; // Много частиц!
+const PARTICLE_COUNT = 8000; // Много частиц для объема
 const HEART_SCALE = 12;
-const FOCAL_LENGTH = 600; // Для 3D-проекции
+const FOCAL_LENGTH = 800; // Перспектива для 3D-эффекта
 
 let particles = [];
-let rotationY = 0; // Угол вращения всего сердца
-let phase = 'assemble'; // Фазы: 'assemble', 'hold', 'disassemble'
-let phaseTimer = 0;
+let autoExplodeTimer = 0;
 
 // Функция 2D-уравнения сердца
 function getHeartPoint(t) {
@@ -31,90 +29,64 @@ function getHeartPoint(t) {
 }
 
 class Particle {
-    constructor(isBurst = false) {
-        this.isBurst = isBurst;
-        if (isBurst) {
-            // Для взрыва при клике
-            this.x = width / 2;
-            this.y = height / 2;
-            this.z = 0;
-            this.vx = (Math.random() - 0.5) * 20;
-            this.vy = (Math.random() - 0.5) * 20;
-            this.vz = (Math.random() - 0.5) * 20;
-            this.life = 1.0;
-            this.decay = Math.random() * 0.02 + 0.01;
-            this.color = WINE_SHADES[Math.floor(Math.random() * WINE_SHADES.length)];
-            this.size = Math.random() * 3 + 1;
-        } else {
-            // Для обычных частиц
-            this.reset();
-        }
-    }
-
-    reset() {
+    constructor() {
+        // Целевые координаты (где частица должна быть в сердце)
         const t = Math.random() * Math.PI * 2;
         const point = getHeartPoint(t);
         
-        // Создаем объем (3D облако) с помощью шума
-        const noise = 25; 
-        this.baseX = point.x + (Math.random() - 0.5) * noise;
-        this.baseY = point.y + (Math.random() - 0.5) * noise;
-        this.baseZ = (Math.random() - 0.5) * 40; // Глубина сердца
+        // Добавляем объем (шум по X, Y и глубину по Z)
+        this.targetX = point.x + (Math.random() - 0.5) * 25;
+        this.targetY = point.y + (Math.random() - 0.5) * 25;
+        this.targetZ = (Math.random() - 0.5) * 60; // Глубина сердца
         
-        // Начальная позиция (разбросаны далеко)
+        // Текущая позиция (начинаем с разброса, чтобы они слетались)
         this.x = (Math.random() - 0.5) * width * 2;
         this.y = (Math.random() - 0.5) * height * 2;
         this.z = (Math.random() - 0.5) * 1000;
         
+        // Скорость для физики пружины
         this.vx = 0;
         this.vy = 0;
         this.vz = 0;
         
-        this.size = Math.random() * 2.5 + 1;
+        // Внешний вид
+        this.size = Math.random() * 2.5 + 0.5;
         this.color = WINE_SHADES[Math.floor(Math.random() * WINE_SHADES.length)];
-        this.alpha = Math.random() * 0.5 + 0.5;
+        this.alpha = Math.random() * 0.6 + 0.4;
     }
 
     update() {
-        if (this.isBurst) {
-            this.x += this.vx;
-            this.y += this.vy;
-            this.z += this.vz;
-            this.vx *= 0.96;
-            this.vy *= 0.96;
-            this.vz *= 0.96;
-            this.life -= this.decay;
-            return;
-        }
+        // Физика пружины: частица стремится к своей цели
+        const spring = 0.04; // Жесткость пружины
+        const friction = 0.85; // Трение
+        
+        this.vx += (this.targetX - this.x) * spring;
+        this.vy += (this.targetY - this.y) * spring;
+        this.vz += (this.targetZ - this.z) * spring;
+        
+        this.vx *= friction;
+        this.vy *= friction;
+        this.vz *= friction;
+        
+        this.x += this.vx;
+        this.y += this.vy;
+        this.z += this.vz;
+    }
 
-        if (phase === 'assemble') {
-            this.x += (this.baseX - this.x) * 0.04;
-            this.y += (this.baseY - this.y) * 0.04;
-            this.z += (this.baseZ - this.z) * 0.04;
-        } else if (phase === 'disassemble') {
-            this.x += this.vx;
-            this.y += this.vy;
-            this.z += this.vz;
-            this.vx *= 0.98;
-            this.vy *= 0.98;
-            this.vz *= 0.98;
-        }
+    // Метод для взрыва (разлета)
+    explode(power = 1) {
+        this.vx += (Math.random() - 0.5) * 40 * power;
+        this.vy += (Math.random() - 0.5) * 40 * power;
+        this.vz += (Math.random() - 0.5) * 40 * power;
     }
 
     draw() {
-        // 3D вращение вокруг оси Y
-        const cosY = Math.cos(rotationY);
-        const sinY = Math.sin(rotationY);
-        
-        const rotX = this.x * cosY - this.z * sinY;
-        const rotZ = this.x * sinY + this.z * cosY;
-        
-        // Перспективная проекция
-        const scale = FOCAL_LENGTH / (FOCAL_LENGTH + rotZ);
-        const screenX = width / 2 + rotX * scale;
+        // 3D-проекция на 2D-экран (без вращения!)
+        const scale = FOCAL_LENGTH / (FOCAL_LENGTH + this.z);
+        const screenX = width / 2 + this.x * scale;
         const screenY = height / 2 + this.y * scale;
         const size = this.size * scale;
-        const alpha = this.isBurst ? this.life : this.alpha * scale;
+        const alpha = this.alpha * scale;
 
         if (size > 0.1 && alpha > 0.01) {
             ctx.beginPath();
@@ -133,59 +105,34 @@ function init() {
     }
 }
 
-// Клик - взрыв частиц
+// Взрыв при клике
 canvas.addEventListener('click', (e) => {
-    const burstParticles = [];
-    for (let i = 0; i < 100; i++) {
-        const p = new Particle(true);
-        p.x = e.clientX;
-        p.y = e.clientY;
-        burstParticles.push(p);
-    }
-    particles.push(...burstParticles);
+    particles.forEach(p => {
+        p.explode(1.5); // Мощный разлет
+    });
 });
 
 function animate() {
     // Эффект шлейфа (полупрозрачный черный прямоугольник)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
     ctx.fillRect(0, 0, width, height);
-    
-    // Вращение всего сердца
-    rotationY += 0.008;
 
-    // Логика смены фаз
-    phaseTimer++;
-    if (phaseTimer > 250 && phase === 'assemble') {
-        phase = 'hold';
-        phaseTimer = 0;
-        // Даем импульс для разлета
-        particles.forEach(p => {
-            if (!p.isBurst) {
-                p.vx = (Math.random() - 0.5) * 15;
-                p.vy = (Math.random() - 0.5) * 15;
-                p.vz = (Math.random() - 0.5) * 15;
-            }
-        });
-    } else if (phaseTimer > 100 && phase === 'hold') {
-        phase = 'disassemble';
-        phaseTimer = 0;
-    } else if (phaseTimer > 200 && phase === 'disassemble') {
-        phase = 'assemble';
-        phaseTimer = 0;
-        init(); // Пересоздаем частицы для новой сборки
+    // Автоматический взрыв каждые ~4 секунды (60 fps * 4 = 240 кадров)
+    autoExplodeTimer++;
+    if (autoExplodeTimer > 240) {
+        particles.forEach(p => p.explode(1));
+        autoExplodeTimer = 0;
     }
 
-    // Отрисовка всех частиц
-    for (let i = particles.length - 1; i >= 0; i--) {
+    // Обновление и отрисовка всех частиц
+    for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         p.update();
         p.draw();
-
-        // Удаляем погасшие частицы взрыва
-        if (p.isBurst && p.life <= 0) {
-            particles.splice(i, 1);
-        }
     }
+    
+    // Сброс прозрачности для следующего кадра
+    ctx.globalAlpha = 1;
 
     requestAnimationFrame(animate);
 }
